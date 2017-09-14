@@ -301,6 +301,63 @@ R_API bool r_diff_buffers_distance_levenstein(RDiff *d, const ut8 *a, ut32 la, c
 	return true;
 }
 
+// Eugene W. Myers' O(ND) diff algorithm
+// Returns edit distance with costs: insertion=1, deletion=1, no substitution
+R_API bool r_diff_buffers_distance_myers(RDiff *diff, const ut8 *a, ut32 la, const ut8 *b, ut32 lb, ut32 *distance, double *similarity) {
+	const bool verbose = diff ? diff->verbose: false;
+	if (!a || !b) {
+		return false;
+	}
+	const ut32 length = la + lb;
+	const ut8 *ea = a + la, *eb = b + lb;
+	// Strip prefix
+	for (; a < ea && b < eb && *a == *b; a++, b++) {}
+	// Strip suffix
+	for (; a < ea && b < eb && ea[-1] == eb[-1]; ea--, eb--) {}
+	la = ea - a;
+	lb = eb - b;
+	ut32 *v0, *v;
+	st64 m = (st64)la + lb, di = 0, low, high, i, x, y;
+	if (m + 2 > SIZE_MAX / sizeof (st64) || !(v0 = malloc ((m + 2) * sizeof (ut32)))) {
+		return false;
+	}
+	v = v0 + lb;
+	v[1] = 0;
+	for (di = 0; di <= m; di++) {
+		low = -di + 2 * R_MAX (0, di - (st64)lb);
+		high = di - 2 * R_MAX (0, di - (st64)la);
+		for (i = low; i <= high; i += 2) {
+			x = i == -di || (i != di && v[i-1] < v[i+1]) ? v[i+1] : v[i-1] + 1;
+			y = x - i;
+			while (x < la && y < lb && a[x] == b[y]) {
+				x++;
+				y++;
+			}
+			v[i] = x;
+			if (x == la && y == lb) {
+				goto out;
+			}
+		}
+		if (verbose && di % 10000 == 0) {
+			eprintf ("\rProcessing dist %" PFMT64d " of max %" PFMT64d "\r", di, m);
+		}
+	}
+
+out:
+	if (verbose) {
+		eprintf ("\n");
+	}
+	free (v0);
+	//Clean up output on loop exit (purely aesthetic)
+	if (distance) {
+		*distance = di;
+	}
+	if (similarity) {
+		*similarity = length ? 1.0 - (double)di / length : 1.0;
+	}
+	return true;
+}
+
 R_API bool r_diff_buffers_distance_original(RDiff *d, const ut8 *a, ut32 la, const ut8 *b, ut32 lb, ut32 *distance, double *similarity) {
 	int i, j, tmin, **m;
 	ut64 totalsz = 0;
@@ -357,7 +414,7 @@ R_API bool r_diff_buffers_distance_original(RDiff *d, const ut8 *a, ut32 la, con
 		*similarity = (double)1 - (double)(m[la][lb])/(double)(R_MAX(la, lb));
 	}
 
-	for(i = 0; i <= la; i++) {
+	for (i = 0; i <= la; i++) {
 		free (m[i]);
 	}
 	free (m);
@@ -366,8 +423,15 @@ R_API bool r_diff_buffers_distance_original(RDiff *d, const ut8 *a, ut32 la, con
 }
 
 R_API bool r_diff_buffers_distance(RDiff *d, const ut8 *a, ut32 la, const ut8 *b, ut32 lb, ut32 *distance, double *similarity) {
-	if (d && d->levenstein) {
-		return r_diff_buffers_distance_levenstein (d, a, la, b, lb, distance, similarity);
+	if (d) {
+		switch (d->type) {
+		case 'm':
+			return r_diff_buffers_distance_myers (d, a, la, b, lb, distance, similarity);
+		case 'l':
+			return r_diff_buffers_distance_levenstein (d, a, la, b, lb, distance, similarity);
+		default:
+			break;
+		}
 	}
 	return r_diff_buffers_distance_original (d, a, la, b, lb, distance, similarity);
 }

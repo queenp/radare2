@@ -3,15 +3,16 @@
 #ifndef R2_IO_H
 #define R2_IO_H
 
-#include <r_socket.h>
-#include <r_list.h>
-#include <r_util.h>
-#include <r_vector.h>
+#include "r_list.h"
+#include "r_socket.h"
+#include "r_util.h"
+#include "r_vector.h"
 
 #define R_IO_READ	4
 #define R_IO_WRITE	2
 #define R_IO_EXEC	1
 #define R_IO_RW		(R_IO_READ|R_IO_WRITE)
+#define R_IO_RWX	(R_IO_READ|R_IO_WRITE|R_IO_EXEC)
 #define R_IO_PRIV	16
 #define R_IO_SHAR	32	//wtf is this
 
@@ -100,7 +101,14 @@ typedef struct r_io_desc_t {
 	RIO *io;
 } RIODesc;
 
-//#warning move RIORap somewhere else
+typedef struct {
+	ut32 magic;
+	int pid;
+	int tid;
+	void *data;
+} RIODescData;
+
+// #warning move RIORap somewhere else
 typedef struct {
 	RSocket *fd;
 	RSocket *client;
@@ -151,8 +159,7 @@ typedef struct r_io_map_t {
 	int fd;
 	int flags;
 	ut32 id;
-	ut64 from;
-	ut64 to;
+	RAddrInterval itv;
 	ut64 delta; //this delta means paddr when talking about section
 	char *name;
 } RIOMap;
@@ -289,6 +296,7 @@ R_API RIOMap *r_io_map_resolve (RIO *io, ut32 id);
 R_API RIOMap *r_io_map_add (RIO *io, int fd, int flags, ut64 delta, ut64 addr, ut64 size, bool do_skyline);
 R_API RIOMap *r_io_map_get (RIO *io, ut64 addr);		//returns the map at vaddr with the highest priority
 R_API RIOMap *r_io_map_get_paddr (RIO *io, ut64 paddr);		//returns the map at paddr with the highest priority
+R_API void r_io_map_reset(RIO* io);
 R_API bool r_io_map_del (RIO *io, ut32 id);
 R_API bool r_io_map_del_for_fd (RIO *io, int fd);
 R_API bool r_io_map_priorize (RIO *io, ut32 id);
@@ -298,12 +306,12 @@ R_API void r_io_map_fini (RIO *io);
 R_API bool r_io_map_is_in_range (RIOMap *map, ut64 from, ut64 to);
 R_API void r_io_map_set_name (RIOMap *map, const char *name);
 R_API void r_io_map_del_name (RIOMap *map);
-R_API bool r_io_map_is_in_range (RIOMap* map, ut64 from, ut64 to);
 R_API RIOMap *r_io_map_add_next_available(RIO *io, int fd, int flags, ut64 delta, ut64 addr, ut64 size, ut64 load_align);
 R_API void r_io_map_calculate_skyline(RIO *io);
+R_API RList* r_io_map_get_for_fd(RIO *io, int fd);
 
 //io.c
-R_API RIO *r_io_new ();
+R_API RIO *r_io_new (void);
 R_API RIO *r_io_init (RIO *io);
 R_API RIODesc *r_io_open_nomap (RIO *io, const char *uri, int flags, int mode);		//should return int
 R_API RIODesc *r_io_open (RIO *io, const char *uri, int flags, int mode);
@@ -478,7 +486,7 @@ R_API bool r_io_is_valid_offset (RIO *io, ut64 offset, int hasperm);
 R_API bool r_io_addr_is_mapped(RIO *io, ut64 vaddr);
 R_API bool r_io_read_i (RIO* io, ut64 addr, ut64 *val, int size, bool endian);
 R_API bool r_io_write_i (RIO* io, ut64 addr, ut64 *val, int size, bool endian);
-R_API RIOAccessLog *r_io_accesslog_new ();
+R_API RIOAccessLog *r_io_accesslog_new (void);
 R_API void r_io_accesslog_free (RIOAccessLog *log);
 R_API void r_io_accesslog_sort (RIOAccessLog *log);
 R_API void r_io_accesslog_sqash_ignore_gaps (RIOAccessLog *log);

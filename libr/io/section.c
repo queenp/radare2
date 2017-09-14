@@ -153,7 +153,6 @@ R_API bool r_io_section_bin_rm(RIO *io, ut32 bin_id) {
 	return (!(length == ls_length (io->sections)));
 }
 
-
 R_API RIOSection *r_io_section_get_name(RIO *io, const char *name) {
 	RIOSection *s;
 	SdbListIter *iter;
@@ -550,7 +549,7 @@ static bool _section_reapply_for_emul(RIO *io, RIOSection *sec) {
 			sec->filemap = sec->memmap = 0;
 			return _section_apply (io, sec, R_IO_SECTION_APPLY_FOR_EMULATOR);
 		}
-		size = (size_t) (map->to - map->from + 1);
+		size = map->itv.size;
 		buf = calloc (1, size + 1);
 		if (!buf) {
 			return false;
@@ -604,7 +603,7 @@ static bool _section_reapply_for_emul(RIO *io, RIOSection *sec) {
 	if (!map) {
 		return _section_apply (io, sec, R_IO_SECTION_APPLY_FOR_EMULATOR);
 	}
-	size = (size_t) (map->to - map->from + 1);
+	size = map->itv.size;
 	//save desc to restore later
 	desc = io->desc;
 	r_io_use_fd (io, map->fd);

@@ -16,7 +16,7 @@ static int fd_write_at_wrap (RIO *io, int fd, ut64 addr, ut8 *buf, int len, RIOM
 
 static int al_fd_read_at_wrap (RIO *io, int fd, ut64 addr, ut8 *buf, int len, RIOMap *map, void *user) {
 	RIOAccessLog *log = (RIOAccessLog *)user;
-	RIOAccessLogElement *ale = R_NEW0(RIOAccessLogElement);
+	RIOAccessLogElement *ale = R_NEW0 (RIOAccessLogElement);
 	int rlen = r_io_fd_read_at (io, fd, addr, buf, len);
 	if (ale) {
 		ale->expect_len = len;
@@ -26,7 +26,7 @@ static int al_fd_read_at_wrap (RIO *io, int fd, ut64 addr, ut8 *buf, int len, RI
 		ale->fd = fd;
 		ale->mapid = map->id;
 		ale->paddr = addr;
-		ale->vaddr = map->from + (addr - map->delta);
+		ale->vaddr = map->itv.addr + (addr - map->delta);
 		r_list_append (log->log, ale);
 	} else {
 		log->allocation_failed = true;
@@ -36,7 +36,7 @@ static int al_fd_read_at_wrap (RIO *io, int fd, ut64 addr, ut8 *buf, int len, RI
 
 static int al_fd_write_at_wrap (RIO *io, int fd, ut64 addr, ut8 *buf, int len, RIOMap *map, void *user) {
 	RIOAccessLog *log = (RIOAccessLog *)user;
-	RIOAccessLogElement *ale = R_NEW0(RIOAccessLogElement);
+	RIOAccessLogElement *ale = R_NEW0 (RIOAccessLogElement);
 	int rlen = r_io_fd_write_at (io, fd, addr, buf, len);
 	if (ale) {
 		ale->expect_len = len;
@@ -46,7 +46,7 @@ static int al_fd_write_at_wrap (RIO *io, int fd, ut64 addr, ut8 *buf, int len, R
 		ale->fd = fd;
 		ale->mapid = map->id;
 		ale->paddr = addr;
-		ale->vaddr = map->from + (addr - map->delta);
+		ale->vaddr = map->itv.addr + (addr - map->delta);
 		r_list_append (log->log, ale);
 	} else {
 		log->allocation_failed = true;
@@ -56,67 +56,61 @@ static int al_fd_write_at_wrap (RIO *io, int fd, ut64 addr, ut8 *buf, int len, R
 
 typedef int (*cbOnIterMap)(RIO *io, int fd, ut64 addr, ut8 *buf, int len, RIOMap *map, void *user);
 
-// len > 0
-static int onIterMap(SdbListIter *iter, RIO *io, ut64 vaddr, ut8 *buf,
+// Precondition: len > 0
+// Non-stop IO
+// Returns true iff all reads/writes on overlapped maps are complete.
+static bool onIterMap(SdbListIter *iter, RIO *io, ut64 vaddr, ut8 *buf,
 		int len, int match_flg, cbOnIterMap op, void *user) {
 	// vendaddr may be 0 to denote 2**64
-	ut64 vendaddr = vaddr + len;
-	int t, ret = 0;
+	ut64 vendaddr = vaddr + len, len1;
+	int t;
+	bool ret = true;
 	for (; iter; iter = iter->p) {
 		RIOMap *map = (RIOMap *)iter->data;
-		// [vaddr, vendaddr) [map->from, map->to]
-		if (vaddr <= map->to && map->from <= vendaddr - 1) {
+		ut64 to = r_itv_end (map->itv);
+		if (r_itv_overlap2 (map->itv, vaddr, len)) {
 			if ((map->flags & match_flg) == match_flg || io->p_cache) {
-				t = vaddr < map->from
-					? op (io, map->fd, map->delta, buf + map->from - vaddr,
-								R_MIN (vendaddr - map->from, map->to - map->from + 1), map, user)
-					: op (io, map->fd, map->delta + vaddr - map->from, buf,
-								R_MIN (map->to - vaddr + 1, len), map, user);
-				if (t < 0) {
-					return t;
+				t = vaddr < map->itv.addr
+						? op (io, map->fd, map->delta, buf + map->itv.addr - vaddr,
+								len1 = R_MIN (vendaddr - map->itv.addr, map->itv.size), map, user)
+						: op (io, map->fd, map->delta + vaddr - map->itv.addr, buf,
+								len1 = R_MIN (to - vaddr, len), map, user);
+				if (t != len1) {
+					ret = false;
 				}
-				ret += t;
 			}
-			if (vaddr < map->from) {
-				t = onIterMap (iter->p, io, vaddr, buf, map->from - vaddr, match_flg, op, user);
-				if (t < 0) {
-					return t;
+			if (vaddr < map->itv.addr) {
+				t = onIterMap (iter->p, io, vaddr, buf, map->itv.addr - vaddr, match_flg, op, user);
+				if (!t) {
+					ret = false;
 				}
-				ret += t;
 			}
-			if (map->to < vendaddr - 1) {
-				t = onIterMap (iter->p, io, map->to + 1, buf + map->to - vaddr + 1, vendaddr - map->to - 1, match_flg, op, user);
-				if (t < 0) {
-					return t;
+			if (to - 1 < vendaddr - 1) {
+				t = onIterMap (iter->p, io, to, buf + to - vaddr, vendaddr - to, match_flg, op, user);
+				if (!t) {
+					ret = false;
 				}
-				ret += t;
 			}
-			break;
 		}
 	}
 	return ret;
 }
 
-// len >= 0
-static int onIterMap_wrap(SdbListIter *iter, RIO *io, ut64 vaddr, ut8 *buf,
+// Precondition: len >= 0
+// Non-stop IO supporting address space wraparound
+// Returns true iff all reads/writes on overlapped maps are complete.
+static bool onIterMap_wrap(SdbListIter *iter, RIO *io, ut64 vaddr, ut8 *buf,
 		int len, int match_flg, cbOnIterMap op, void *user) {
 	if (!len) {
-		return 0;
+		return true;
 	}
-	int len1, t, ret;
+	bool ret = true;
 	// vaddr + len > 2**64
 	if (vaddr > UT64_MAX - len + 1) {
-		len1 = UT64_MAX - vaddr + 1;
-		ret = onIterMap (iter, io, vaddr, buf, len1, match_flg, op, user);
-		if (ret >= 0) {
-			t = onIterMap (iter, io, 0, buf + len1, len - len1, match_flg, op, user);
-			if (t < 0) {
-				ret = t;
-			} else {
-				ret += t;
-			}
-		}
-	} else {
+		ret = onIterMap (iter, io, 0, buf - vaddr, len + vaddr, match_flg, op, user);
+		len = -vaddr;
+	}
+	if (ret) {
 		ret = onIterMap (iter, io, vaddr, buf, len, match_flg, op, user);
 	}
 	return ret;
@@ -318,7 +312,7 @@ R_API bool r_io_vread_at(RIO* io, ut64 vaddr, ut8* buf, int len) {
 	if (!io->maps) {
 		return false;
 	}
-	return onIterMap_wrap (io->maps->tail, io, vaddr, buf, len, R_IO_READ, fd_read_at_wrap, NULL) == len;
+	return onIterMap_wrap (io->maps->tail, io, vaddr, buf, len, R_IO_READ, fd_read_at_wrap, NULL);
 }
 
 R_API bool r_io_vwrite_at(RIO* io, ut64 vaddr, const ut8* buf, int len) {
@@ -329,7 +323,7 @@ R_API bool r_io_vwrite_at(RIO* io, ut64 vaddr, const ut8* buf, int len) {
 	if (!io->maps) {
 		return false;
 	}
-	return onIterMap_wrap (io->maps->tail, io, vaddr, (ut8*)buf, len, R_IO_WRITE, fd_write_at_wrap, NULL) == len;
+	return onIterMap_wrap (io->maps->tail, io, vaddr, (ut8*)buf, len, R_IO_WRITE, fd_write_at_wrap, NULL);
 }
 
 R_API RIOAccessLog *r_io_al_vread_at(RIO* io, ut64 vaddr, ut8* buf, int len) {
@@ -345,7 +339,7 @@ R_API RIOAccessLog *r_io_al_vread_at(RIO* io, ut64 vaddr, ut8* buf, int len) {
 		memset (buf, 0xff, len);
 	}
 	log->buf = buf;
-	(void)onIterMap_wrap (io->maps->tail, io, vaddr, buf, len, R_IO_READ, al_fd_read_at_wrap, log);
+	onIterMap (io->maps->tail, io, vaddr, buf, len, R_IO_READ, al_fd_read_at_wrap, log);
 	return log;
 }
 
@@ -359,7 +353,7 @@ R_API RIOAccessLog *r_io_al_vwrite_at(RIO* io, ut64 vaddr, const ut8* buf, int l
 		return NULL;
 	}
 	log->buf = (ut8*)buf;
-	(void)onIterMap_wrap (io->maps->tail, io, vaddr, (ut8*)buf, len, R_IO_WRITE, al_fd_write_at_wrap, log);
+	(void)onIterMap (io->maps->tail, io, vaddr, (ut8*)buf, len, R_IO_WRITE, al_fd_write_at_wrap, log);
 	return log;
 }
 
@@ -418,7 +412,7 @@ R_API RIOAccessLog *r_io_al_read_at(RIO* io, ut64 addr, ut8* buf, int len) {
 
 R_API bool r_io_write_at(RIO* io, ut64 addr, const ut8* buf, int len) {
 	int i;
-	bool ret;
+	bool ret = false;
 	ut8 *mybuf = (ut8*)buf;
 	if (!io || !buf || len < 1) {
 		return false;
@@ -431,7 +425,7 @@ R_API bool r_io_write_at(RIO* io, ut64 addr, const ut8* buf, int len) {
 		}
 	}
 	if (io->cached) {
-		ret = r_io_cache_write (io, addr, mybuf, len);
+		r_io_cache_write (io, addr, mybuf, len);	//can be ignored for the return
 	} else if (io->va) {
 		ret = r_io_vwrite_at (io, addr, mybuf, len);
 	} else {
